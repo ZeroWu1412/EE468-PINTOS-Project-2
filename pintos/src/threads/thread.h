@@ -4,7 +4,6 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -25,13 +24,8 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
-struct child_status {
-  tid_t child_tid;
-  bool exited;
-  bool has_been_waited;
-  int child_exit_status;
-  struct list_elem elem_child_status;
-};
+// max name length of a thread
+#define NAME_MAX_SIZE 16
 
 /* A kernel thread or user process.
 
@@ -94,25 +88,23 @@ struct thread
     /* Owned by thread.c. */
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
-    char name[16];                      /* Name (for debugging purposes). */
+    char name[NAME_MAX_SIZE];           /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
-    struct list open_files;
-    int next_fd;
-    int child_load;
-    struct lock child_lock;
-    struct condition child_condition;
-    struct list children;               /* List of struct child_status elements */
-    tid_t parent_tid;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    int exit_status;                    /* Thread exit status */
+    bool is_user;                       /* If the thread is for a user program. */
+    struct thread *parent;              /* The parent thread. */
+    struct list children;               /* Child process info. */
+    struct list files;                  /* File associated with the thread. */
+    struct file *exec;                  /* File the thread is executing. */
 #endif
 
     /* Owned by thread.c. */
@@ -131,7 +123,12 @@ void thread_tick (void);
 void thread_print_stats (void);
 
 typedef void thread_func (void *aux);
+#if USERPROG
+tid_t thread_create (const char *name, int priority, thread_func *, void *,
+  bool);
+#else
 tid_t thread_create (const char *name, int priority, thread_func *, void *);
+#endif
 
 void thread_block (void);
 void thread_unblock (struct thread *);
@@ -154,6 +151,9 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
-struct thread * thread_get_by_id (tid_t);
+
+#ifdef USERPROG
+void remove_parent (tid_t tid);
+#endif
 
 #endif /* threads/thread.h */

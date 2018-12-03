@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -64,7 +65,14 @@ static void kernel_thread (thread_func *, void *aux);
 static void idle (void *aux UNUSED);
 static struct thread *running_thread (void);
 static struct thread *next_thread_to_run (void);
+
+#ifdef USERPROG
+static void init_thread (struct thread *, const char *name, int priority,
+  bool is_user);
+#else
 static void init_thread (struct thread *, const char *name, int priority);
+#endif
+
 static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
@@ -95,10 +103,15 @@ thread_init (void)
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
+
+#ifdef USERPROG
+  init_thread (initial_thread, "main", PRI_DEFAULT, false);
+#else
   init_thread (initial_thread, "main", PRI_DEFAULT);
+#endif
+
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
-
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -108,8 +121,15 @@ thread_start (void)
 {
   /* Create the idle thread. */
   struct semaphore idle_started;
+
+  //init_info (initial_thread, initial_thread->tid);
+
   sema_init (&idle_started, 0);
+#if USERPROG
+  thread_create ("idle", PRI_MIN, idle, &idle_started, false);
+#else
   thread_create ("idle", PRI_MIN, idle, &idle_started);
+#endif
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -163,16 +183,21 @@ thread_print_stats (void)
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
+#if USERPROG
 tid_t
-thread_create (const char *name, int priority,
-               thread_func *function, void *aux)
+thread_create (const char *name, int priority, thread_func *function,
+  void *aux, bool is_user)
+#else
+tid_t
+thread_create (const char *name, int priority, thread_func *function,
+  void *aux)
+#endif
 {
   struct thread *t;
   struct kernel_thread_frame *kf;
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
-  enum intr_level old_level;
 
   ASSERT (function != NULL);
 
@@ -182,14 +207,12 @@ thread_create (const char *name, int priority,
     return TID_ERROR;
 
   /* Initialize thread. */
+#ifdef USERPROG
+  init_thread (t, name, priority, is_user);
+#else
   init_thread (t, name, priority);
+#endif
   tid = t->tid = allocate_tid ();
-  t->parent_tid = thread_current()->tid;
-
-  /* Prepare thread for first run by initializing its stack.
-     Do this atomically so intermediate values for the 'stack'
-     member cannot be observed. */
-  old_level = intr_disable ();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -206,28 +229,15 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
-  intr_set_level (old_level);
+#ifdef USERPROG
+  // set parent thread
+  t->parent = thread_current ();
+#endif
 
   /* Add to run queue. */
   thread_unblock (t);
 
   return tid;
-}
-
-struct thread *
-thread_current (void)
-{
-  struct thread *t = running_thread ();
-
-  /* Make sure T is really a thread.
-     If either of these assertions fire, then your thread may
-     have overflowed its stack.  Each thread has less than 4 kB
-     of stack, so a few big automatic arrays or moderate
-     recursion can cause stack overflow. */
-  ASSERT (is_thread (t));
-  ASSERT (t->status == THREAD_RUNNING);
-
-  return t;
 }
 
 /* Puts the current thread to sleep.  It will not be scheduled
@@ -273,6 +283,25 @@ const char *
 thread_name (void)
 {
   return thread_current ()->name;
+}
+
+/* Returns the running thread.
+   This is running_thread() plus a couple of sanity checks.
+   See the big comment at the top of thread.h for details. */
+struct thread *
+thread_current (void)
+{
+  struct thread *t = running_thread ();
+
+  /* Make sure T is really a thread.
+     If either of these assertions fire, then your thread may
+     have overflowed its stack.  Each thread has less than 4 kB
+     of stack, so a few big automatic arrays or moderate
+     recursion can cause stack overflow. */
+  ASSERT (is_thread (t));
+  ASSERT (t->status == THREAD_RUNNING);
+
+  return t;
 }
 
 /* Returns the running thread's tid. */
@@ -382,7 +411,7 @@ thread_get_recent_cpu (void)
   /* Not yet implemented. */
   return 0;
 }
-
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -431,7 +460,7 @@ kernel_thread (thread_func *function, void *aux)
   function (aux);       /* Execute the thread function. */
   thread_exit ();       /* If function() returns, kill the thread. */
 }
-
+
 /* Returns the running thread. */
 struct thread *
 running_thread (void)
@@ -455,9 +484,17 @@ is_thread (struct thread *t)
 
 /* Does basic initialization of T as a blocked thread named
    NAME. */
+
+#ifdef USERPROG
+static void
+init_thread (struct thread *t, const char *name, int priority, bool is_user)
+#else
 static void
 init_thread (struct thread *t, const char *name, int priority)
+#endif
 {
+  enum intr_level old_level;
+
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
@@ -468,18 +505,35 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+#ifdef USERPROG
+  // detect the difference between the threads for kernel processes and
+  // user processes so we know whether to attempt to update the parent thread
+  // or not
+  t->is_user = is_user;
+
+  // set a default exit status
+  // if the thread exits cleanly, this will be updated in exit()
+  t->exit_status = -1;
+
+  // initialise list of child processes
+  list_init (&t->children);
+
+  // default value for the parent thread
+  t->parent = NULL;
+
+  // initalise list of files
+  list_init (&t->files);
+
+  // set executable file to NULL by default
+  t->exec = NULL;
+#endif
+
+  old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
-
-  // initialize file list
-  list_init (&t->open_files);
-  t->next_fd=2;
-
-  // initialize child infrastructure
-  list_init(&t->children);
-  t->child_load = 0;
-  lock_init(&t->child_lock);
-  cond_init(&t->child_condition);
+  intr_set_level (old_level);
 }
+
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
    returns a pointer to the frame's base. */
@@ -590,23 +644,29 @@ allocate_tid (void)
 
   return tid;
 }
-
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
 
-struct thread
-*thread_get_by_id (tid_t tid)
+#ifdef USERPROG
+/* Remove a pointer to a parent thread. */
+void
+remove_parent (tid_t tid)
 {
-  ASSERT (tid != TID_ERROR);
   struct list_elem *e;
   struct thread *t;
-  e = list_tail (&all_list);
-  while ((e = list_prev (e)) != list_head (&all_list))
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+    e = list_next (e))
     {
       t = list_entry (e, struct thread, allelem);
-      if (t->tid == tid && t->status != THREAD_DYING)
-        return t;
+
+      if (is_thread (t) && t->tid == tid && t->parent != NULL)
+        {
+          t->parent = NULL;
+          return;
+        }
     }
-  return NULL;
 }
+#endif

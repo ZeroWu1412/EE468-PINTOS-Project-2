@@ -8,6 +8,7 @@ ls
 mcat
 mcp
 mkdir
+my
 pwd
 rm
 shell
@@ -17,3 +18,5 @@ lineup
 matmult
 recursor
 *.d
+*.o
+*.a

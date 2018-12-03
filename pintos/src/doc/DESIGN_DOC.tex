@@ -1,0 +1,394 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{fullpage}
+\usepackage{parskip}
+\usepackage{minted}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue
+}
+
+\title{Pintos Design Document: User Programs}
+\author{
+  Matthew Dowdell (09011906)
+  \and
+  Jake Robertson (15016276)
+}
+\date{}
+
+\begin{document}
+
+% <http://stackoverflow.com/a/3142372/1942596>
+\null
+\nointerlineskip
+\vfill
+\let\snewpage \newpage
+\let\newpage \relax
+\maketitle
+\let \newpage \snewpage
+\vfill
+\break
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+\label{sec:introduction}
+
+This document describes the implementation of user programs in Pintos. The first part the assignment is to implement argument passing, thus setting up the \verb!argc! and \verb!argv! arguments to a programs \verb!main! function. The second part covers an implementation of a selection of system calls which allow child processes and file operations.
+
+The repository storing the files and changes for this assignment can be found at \url{https://gitlab.uwe.ac.uk/mattdowdell/pintos}.
+
+The files changed for the assignment are:
+
+% To regenerate these, use:
+% git diff --stat 5c7e71c4 master -- . ':!.editorconfig' ':!.gitignore' ':!README.md' ':!doc' ':!examples' ':!lib' ':!utils' ':!userprog/myrun' ':!userprog/run'
+
+\begin{verbatim}
+  threads/synch.c      |  44 +++--
+  threads/thread.c     | 153 +++++++++++----
+  threads/thread.h     |  22 ++-
+  userprog/exception.c |  23 ++-
+  userprog/process.c   | 456 +++++++++++++++++++++++++++++++++++++++-----
+  userprog/process.h   |  27 ++-
+  userprog/syscall.c   | 522 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+  userprog/syscall.h   |   3 +
+  8 files changed, 1130 insertions(+), 120 deletions(-)
+\end{verbatim}
+
+See \url{https://gitlab.uwe.ac.uk/mattdowdell/pintos/compare/5c7e71c4...master} for more details.
+
+\section{Argument Passing}
+\label{sec:argument-passing}
+
+Argument passing requires setting up the stack ready for the main function of a C program to be called. In summary:
+
+\begin{itemize}
+    \item The command line arguments are added to the stack. This is achieved by iterating over the arguments, character by character, starting at the end. When the end of the next argument is found, denoted by a space or \verb!\0!, its position is stored. Once the start of the arguments string or a space is detected, the length of the argument is calculated based on the difference between the start and the end. To add the argument to the stack, \verb!strlcpy! is called using the start position of the argument and it's length.
+
+    \item The stack is padded with zeroes to the start of the next 4 byte section.
+
+    \item A pointer to \verb!NULL! is added to the stack, to ensure \verb!argv[argc]! is  \verb!NULL! as required by the C specification.
+
+    \item Pointers to the start of each argument are added to the stack from the last argument to the first.
+
+    \item A pointer to the first argument pointer is added to the stack.
+
+    \item The number of arguments, which is stored in a signed integer, is added to the stack.
+
+    \item A return address is added to the stack. For the purposes of this assignment, the return address is \verb!NULL!.
+\end{itemize}
+
+Taking command line arguments to be \verb!"echo foo bar baz"!, the stack would end up as described in Table 1, assuming an original stack pointer value of \verb!0xc0000000! (the default value of \verb!PHYS_BASE!).
+
+\newpage
+
+\label{table:1}
+\begin{table}[th]
+    \centering
+    \begin{tabular}{llll}
+        \verb!0xbffffffc! & \verb!baz\0! & \verb!char[4]! & \verb!argv[3][...]!\\
+        \verb!0xbffffff8! & \verb!bar\0! & \verb!char[4]! & \verb!argv[2][...]! \\
+        \verb!0xbffffff4! & \verb!foo\0! & \verb!char[4]! & \verb!argv[1][...]! \\
+        \verb!0xbfffffef! & \verb!echo\0! & \verb!char[5]! & \verb!argv[0][...]! \\
+        \verb!0xbfffffee! & \verb!0! & \verb!char! & \verb!word-align!\\
+        \verb!0xbfffffed! & \verb!0! & \verb!char! & \verb!word-align! \\
+        \verb!0xbfffffec! & \verb!0! & \verb!char! & \verb!word-align! \\
+        \verb!0xbfffffe8! & \verb!NULL! & \verb!char *! & \verb!argv[4]! \\
+        \verb!0xbfffffe4! & \verb!0xbffffffc! & \verb!char *! & \verb!argv[3]! \\
+        \verb!0xbfffffe0! & \verb!0xbffffff8! & \verb!char *! & \verb!argv[2]! \\
+        \verb!0xbfffffdc! & \verb!0xbffffff4! & \verb!char *! & \verb!argv[1]! \\
+        \verb!0xbfffffd8! & \verb!0xbfffffef! & \verb!char *! & \verb!argv[0]! \\
+        \verb!0xbfffffd4! & \verb!0xbfffffd8! & \verb!char **! & \verb!**argv! \\
+        \verb!0xbfffffd0! & \verb!4! & \verb!int! & \verb!argc! \\
+        \verb!0xbfffffcc! & \verb!NULL! & \verb!void *! & \verb!return address! \\
+    \end{tabular}
+    \caption{An example user program stack.}
+\end{table}
+
+The changes made under this part of the assignment are as follows:
+
+\begin{itemize}
+    \item Use the first command line argument as the name of the thread in \verb!process_execute!, rather than the entire command line argument string, for example \verb!"echo"! rather than \verb!"echo foo bar baz"!. This is achieved by iterating over the arguments and copying each character to a new char array until a space or null character is found, at which point a null character is appended to the new char array.
+
+    \item Pass the first command line argument to \verb!load! in \verb!start_process! as opposed to the entire command line argument string using the same method detailed in the point above.
+
+    \item Attempt to set up the stack for the given command line arguments in \verb!load! at the last step before checking if \verb!load! completed successfully. This operation may fail if a stack overflow is caused which is detected by ensuring that the stack pointer does not fall below \verb!0x00000000! and causing it to wrap. This is detected by making sure that the stack pointer is always below \verb!PHYS_BASE!. To ensure that the stack pointer cannot wrap to the extent that it end up between the previous location of the stack pointer and \verb!0x00000000!, the size being added to the stack must be less than than \verb!PHYS_BASE!.
+\end{itemize}
+
+\section{System Calls}
+\label{sec:system-calls}
+
+All requested system calls have been implemented, the details of which can be found in the sub-sections below. In implementing these system calls the following structures and enumerations were used/altered.
+
+\begin{minted}{c}
+/* threads/thread.h */
+
+struct thread
+  {
+    // ...
+    #ifdef USERPROG
+      // ...
+      int exit_status;
+      bool is_user;
+      struct thread *parent;
+      struct list children;
+      struct list files;
+      struct file *exec;
+    #endif
+    // ...
+  };
+\end{minted}
+
+The added members of the \verb!thread! structure are used as follows:
+
+\begin{itemize}
+    \item \verb!exit_status!: Tracks the exit status of the thread which is passed to the \verb!exit_status! member of the \verb!process! structure when \verb!process_exit! is called. By default, this is -1 to indicate the thread was killed by the kernel due to an exception. If the thread completes with no error, it will be updated to the status set by it's process.
+
+    \item \verb!is_user!: Denotes whether the thread is a thread for a kernel process or for a user process. This is used to differentiate between threads when checking whether the thread should communicate with its parent. Defaults to \verb!NULL!.
+
+    \item \verb!parent!: A pointer to the threads parent. If the thread is a kernel thread, this will be \verb!NULL!.
+
+    \item \verb!children!: A list containing the \verb!elem! member of a \verb!process! structure. Combined with \verb!parent!, this is used to allow a child thread to update it's parent of changes when required, such as the its exit status.
+
+    \item \verb!files!: A list containing the \verb!elem! member of a \verb!file_map! structure. This list is used to track and access any open files associated with the thread.
+
+    \item \verb!exec!: To prevent the file being executed by a process being altered during execution, the file is locked to prevent writes after being loaded in \verb!load!. To allow the file to be written to after the process has finished executing, a reference to it is stored and then unlocked in \verb!process_exit! once the process has exited.
+\end{itemize}
+
+\begin{minted}{c}
+/* userprog/process.h */
+
+enum load_status
+  {
+    NOT_LOADED,
+    LOAD_SUCCESS;
+    LOAD_FAILED;
+  };
+
+struct process
+  {
+    struct list_elem elem;
+    pid_t pid;
+    bool is_alive;
+    bool is_waited;
+    int exit_status;
+    enum load_status load_status;
+    struct semaphore wait;
+    struct semaphore load;
+  };
+\end{minted}
+
+The \verb!process! structure is used to store data about a thread for a user program that needs to persist beyond the end of the program. It is used as follows:
+
+\begin{itemize}
+    \item \verb!elem!: A list element to be added to a threads \verb!children! list member. This allows a parent thread to access any changes to a child without being affected by the child thread exiting and its structure subsequently being de-allocated.
+
+    \item \verb!pid!: The id of the process. The same as the child threads \verb!tid! member.
+
+    \item \verb!is_alive!: Whether the child thread is still alive. Used as an additional check before accessing the \verb!exit_status! member to ensure if the child thread exited without errors it has updated the \verb!process! structure in the \verb!children! list of its parent. If the child process has not exited, then the \verb!wait! member is used to block the parent thread until the exit status is known.
+
+    \item \verb!is_waited!: Whether the parent thread has already called \verb!wait! for the child process. If this is \verb!true!, \verb!wait! will return \verb!-1! as required by the specification.
+
+    \item \verb!exit_status!: The exit status of the child thread, corresponding to the \verb!exit_status! member of a \verb!thread! structure. This is set during \verb!process_exit! by copying the value from the current thread to the associated \verb!process! structure in its parent.
+
+    \item \verb!load_status!: Denotes whether the file being executed by a process has loaded without issues or not and defaults to \verb!NOT_LOADED!. If the file loaded without issues, it will be set to \verb!LOAD_SUCCESS!. Otherwise, it will be set to \verb!LOAD_FAILURE!.
+
+    \item \verb!wait!: This semaphore is used by \verb!process_wait! when waiting for the child thread to exit if the child thread is still alive. When the exit status of the child thread is known, the child will increment \verb!wait! to communicate that the parent can continue and return the now known exit status.
+
+    \item \verb!load!: This semaphore is used by \verb!process_execute! to wait for a child process to load its file. When a child thread has loaded the file, it sets the \verb!load_status! member of the \verb!process! structure and allows the parent thread to continue.
+\end{itemize}
+
+A diagrammatic representation of how a \verb!process! structure is linked to a \verb!thread! structure is shown in \hyperref[fig:1]{Figure 1}.
+
+\begin{minted}{c}
+/* userprog/syscall.c */
+
+struct file_map
+  {
+    struct list_elem elem;
+    int fd;
+    struct file *file;
+  };
+\end{minted}
+
+The \verb!file_map! structure is used as follows:
+
+\begin{itemize}
+    \item \verb!elem!: A list element to be added to a threads \verb!files! list member. This is used to associate an open file with a thread enabling the thread to close any leftover open files when exiting.
+
+    \item \verb!fd!: The file descriptor of the file. This effectively takes the role of an index and allows a user program to operate on a file without providing direct access to a files \verb!file! structure.
+
+    \item \verb!file!: A pointer to the \verb!file! structure representing an open file. This is the member that is operated upon by the various file-based system calls.
+\end{itemize}
+
+A \verb!file_map! structure is linked to a \verb!thread! structure in much the same way that a \verb!process! structure is, see \hyperref[fig:1]{Figure 1}, replacing the \verb!process! structure for a \verb!file_map! structure and using the \verb!files! list in a \verb!thread! structure rather than the \verb!children! list.
+
+\subsection{System call handler}
+\label{sec:system-call-handler}
+
+When a user process calls a system call function, control is passed to the kernel which calls \verb!syscall_handler!. This function expects the stack to be set up as detailed in \hyperref[table:2]{Table 2}, where \verb!ARG_CODE! is a code identifying the system call, and \verb!ARG_0!, \verb!ARG_1! and \verb!ARG_2! are arguments to the system call, the number of which may be present depends on the system call. The system call code and arguments are validated using the techniques described in \hyperref[sec:validation]{\S Validation}.
+
+\label{table:2}
+\begin{table}[th]
+    \centering
+    \begin{tabular}{llll}
+        \verb!0x0000000c! & \verb!0x12345990! & \verb!void *! & \verb!ARG_2! \\
+        \verb!0x00000008! & \verb!0x12345680! & \verb!void *! & \verb!ARG_1! \\
+        \verb!0x00000004! & \verb!0x1234567c! & \verb!void *! & \verb!ARG_0! \\
+        \verb!0x00000000! & \verb!0x12345678! & \verb!void *! & \verb!ARG_CODE! \\
+    \end{tabular}
+    \caption{An example system call argument stack.}
+\end{table}
+
+Using a switch statement operating on the system call code, the respective system call function is called with its result being stored in the \verb!eax! register if the function returns a value.
+
+Using an invalid system call, or those outside the scope of this assignment, will cause the process to exit.
+
+\subsection{Validation}
+\label{sec:validation}
+
+Validation of pointers into user memory is done using the functions found in Stanford's pintos project 2 documentation, although they have been modified to include a check that the address pointer argument is below \verb!PHYS_BASE!. This strategy also requires modification of \verb!page_fault! in \verb!userprog/exception.c! as described in the project 2 documentation.
+
+While the above strategy handles pointer validation, which is used for validating the system call code and arguments, they do not validate strings or buffers which require additional checks. For strings of unknown length, \verb!get_user! is called for each byte in the string until \verb!\0! is found. For strings of known length, \verb!get_user! is called for every byte from 0 to the length of the string.
+
+If a string or buffer is an argument for a system call, its respective handler function is responsible for validating it.
+
+\subsection{File synchronisation}
+\label{sec:file-synchronisation}
+
+As calling the functions in the filesys directory from multiple threads simultaneously is unsafe, a semaphore is used to prevent it. The semaphore is initialised to \verb!1!, and decremented by any system call operating on a \verb!file! structure before doing so, specifically \verb!create!, \verb!remove!, \verb!open!, \verb!close!, \verb!read!, \verb!write!, \verb!seek!, \verb!tell! and \verb!filesize!. Once the function has completed, the semaphore is incremented, allowing any waiting threads to complete their file operations.
+
+\subsection{halt}
+\label{sec:halt}
+
+\verb!halt! simply calls \verb!shutdown_power_off!.
+
+\subsection{exit}
+\label{sec:exit}
+
+\verb!exit! Stores the exit status of the process in the \verb!exit_status! element of the thread structure and calls \verb!thread_exit! which calls \verb!process_exit!. \verb!process_exit! outputs the exit status to stdout in the format \verb!"$name: exit($status)"!.
+
+\verb!process_exit! is also responsible for cleaning up after an exiting thread, including updating its parent of its exit status, removing and de-allocating remaining child process structures and closing any open files and de-allocating any file map structures.
+
+\subsection{exec}
+\label{sec:exec}
+
+\verb!exec! is implemented in terms of \verb!process_execute! as it needed to handle both child processes of a user program and the user program itself which is considered to be a child of the main kernel thread.
+
+Before calling \verb!process_execute!, \verb!exec! first ensures that string representing the file to be executed is valid and does not cause any errors. If it does, it will immediately exit.
+
+As \verb!exec! is required to return \verb!-1! in the case it could not execute the requested file, the \verb!load! member of the \verb!process! structure is used to allow the child to pass the success or failure of the file to the parent which is stored in the \verb!load_status! member. If the file is loaded successfully, the threads id is returned as normal.
+
+\subsection{wait}
+\label{sec:wait}
+
+\verb!wait! is implemented in terms of \verb!process_wait!. As with \verb!exec!, this allows user programs to be waited upon by the main kernel thread if required.
+
+\verb!wait! returns the exit status of the thread if it has already exited. Otherwise, it will check if the thread is already being waited upon by using the \verb!is_waited! member of the \verb!process! structure and returning \verb!-1! if it is true. If it is false, it sets \verb!is_waited! to true, and checks the \verb!is_alive! element of the process structure. If the child process has exited, denoted by \verb!is_alive! being false, the exit status is returned immediately. Alternatively, it uses the \verb!wait! semaphore of the \verb!process! structure to wait for the child process to finish.
+
+Once the process has exited, the exit status is retrieved. The child \verb!process! structure is then removed from the \verb!children! list of the \verb!thread! structure and de-allocate, before the exit status is returned. Due to an already waited upon process having \verb!wait! called upon its process id and an invalid process id returning the same result, this was deemed safe to do as well as saving memory for long running processes that use child processes.
+
+\subsection{create}
+\label{sec:create}
+
+\verb!create! is implemented using \verb!filesys_create!.
+
+Before \verb!filesys_create! is called, the name of the file passed as an argument is validated to ensure it does not cause errors using \verb!is_valid_string!. If it does, then it will immediately exit.
+
+In order to prevent multiple threads operating on files simultaneously, the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation} is used.
+
+\subsection{remove}
+\label{sec:remove}
+
+\verb!remove! is implemented using \verb!filesys_remove!.
+
+Before \verb!filesys_remove! is called, the name of the file passed as an argument is validated to ensure it does not cause errors using \verb!is_valid_string!. If it does, then it will immediately exit.
+
+In order to prevent multiple threads operating on files simultaneously, the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation} is used.
+
+\subsection{open}
+\label{sec:open}
+
+In \verb!open!, the name of the file to be opened is validated first to ensure it does not cause errors using \verb!is_valid_string!. Next a file descriptor is generated by starting at the minimum valid value and incrementing it until it does not match an open file associated with the thread.
+
+Once the file descriptor has been generated, a \verb!file_map! structure is allocated and \verb!filesys_open! is called to open the file. Both of these values are then added to the \verb!file_map! structure before adding it to the \verb!files! list of the current thread. The new file descriptor is then returned.
+
+In order to prevent multiple threads operating on files simultaneously, the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation} is used.
+
+\subsection{close}
+\label{sec:close}
+
+In \verb!close!, the file descriptor is used to look up a \verb!file_map! structure in the current threads \verb!files! list. When the \verb!file_map! structure is found, its \verb!file! member is passed to \verb!filesys_close!.
+
+To avoid memory leaks, the \verb!file_map! structure is removed from the threads \verb!files! list and de-allocated.
+
+In order to prevent multiple threads operating on files simultaneously, the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation} is used.
+
+\subsection{read}
+\label{sec:read}
+
+In \verb!read!, there is different behaviour depending on whether the file descriptor is for a file or \verb!stdin! (0). If the file descriptor is for \verb!stdout! (1), the process will exit immediately.
+
+When reading from \verb!stdin!, \verb!input_getc! is used to read one character at a time until the maximum length of the buffer is reached. To validate the buffer, \verb!put_user! is used, which is the opposite operation to \verb!get_user! as described in \hyperref[sec:validation]{\S Validation}. As with \verb!get_user!, it is from Stanford's pintos project 2 documentation.
+
+When reading from a file, the buffer is first validated using the method described in \hyperref[sec:validation]{\S Validation}. Next, the file descriptor is looked up in the current threads \verb!files! list from which the associated \verb!file! structure is retrieved. If no match for the file descriptor can be found, the process will exit. The file read operation itself is implemented with \verb!file_read!, applying the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation}.
+
+\subsection{write}
+\label{sec:write}
+
+In \verb!write!, there is different behaviour depending on whether the file descriptor is for a file or \verb!stdout! (1). If the file descriptor is for \verb!stdin! (0), the process will exit immediately. Before any write occurs, the buffer containing the data to be written from is first validated using the method described in \hyperref[sec:validation]{\S Validation}.
+
+Writing to \verb!stdout! is implemented using \verb!putbuf!. If the buffer is greater than 512 bytes, then the first 512 bytes is output, and the end of the section is recorded. If the remaining data in the buffer is still greater than 512 bytes, this is repeated, otherwise the remaining data is output. This separation of long buffers was implemented due to a recommendation in Stanford's pintos project 2 documentation.
+
+When writing to a file, the file descriptor is looked up in the current threads \verb!files! list from which the associated \verb!file! structure is retrieved. If no match for the file descriptor can be found, the process will exit. The file write operation itself is implemented with \verb!file_write!, applying the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation}.
+
+\subsection{seek}
+\label{sec:seek}
+
+\verb!seek! uses the file descriptor to find the associated \verb!file! structure within the current threads list of files. If no matching file descriptor can be found, the function will silently fail.
+
+The seek operation is itself implemented using \verb!file_seek!, applying the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation}.
+
+\subsection{tell}
+\label{sec:tell}
+
+\verb!tell! uses the file descriptor to find the associated \verb!file! structure within the current threads list of files. If no matching file descriptor can be found, the function will silently fail.
+
+The tell operation itself is implemented using \verb!file_tell!, applying the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation}.
+
+\subsection{filesize}
+\label{sec:filesize}
+
+\verb!filesize! uses the file descriptor to find the associated \verb!file! structure within the current threads list of files. If no matching file descriptor can be found, the function will silently fail.
+
+The filesize operation itself is implemented using \verb!file_length!, applying the synchronisation method described in \hyperref[sec:file-synchronisation]{\S File synchronisation}.
+
+\newpage
+
+\section{Appendix}
+\label{sec:appendix}
+
+\label{fig:1}
+\begin{figure}[h]
+    \includegraphics[width=0.6\textwidth]{structs.png}
+    \centering
+    \caption{How a \texttt{process} structure links to a \texttt{thread} structure.}
+\end{figure}
+
+\newpage
+
+\section{References}
+\label{sec:references}
+
+\begin{itemize}
+    \item Pfaff, B. et al. 2009. \textit{Pintos Projects: Project 2 -- User Programs} [Online]. Available at: \url{https://web.stanford.edu/class/cs140/projects/pintos/pintos_3.html} [Accessed 3 February 2017].
+
+    \item Tanenbaum, A., Bos, H. 2015. \textit{Modern Operating systems}. Harlow, England: Pearson.
+\end{itemize}
+
+\end{document}
