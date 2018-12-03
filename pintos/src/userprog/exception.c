@@ -4,16 +4,12 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
-#include "threads/vaddr.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
 static void kill (struct intr_frame *);
 static void page_fault (struct intr_frame *);
-
-/* Exit with status (-1) for an invalid address */
-//static void exit(int);
 
 /* Registers handlers for interrupts that can be caused by user
    programs.
@@ -152,9 +148,14 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-  /* Exit the process if invalid pointer */
-  // if(!is_valid_ptr(fault_addr))
-  //   exit(-1);
+  // don't kill the thread if it's a kernel exception
+  // used to handle segfaults caused by system calls
+  if (!user)
+    {
+      f->eip = (void *) f->eax;
+      f->eax = 0xffffffff;
+      return;
+    }
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
@@ -166,3 +167,4 @@ page_fault (struct intr_frame *f)
           user ? "user" : "kernel");
   kill (f);
 }
+
