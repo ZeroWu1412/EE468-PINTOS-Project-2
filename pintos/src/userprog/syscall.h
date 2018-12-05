@@ -1,9 +1,20 @@
 #ifndef USERPROG_SYSCALL_H
 #define USERPROG_SYSCALL_H
+#include "userprog/process.h"
 
-#include "threads/thread.h"
 
+void sys_exit (int);
+void sys_halt(void);
+int sys_exec (const char *cmdline);
+int sys_open(char * file);
+int sys_filesize(int fd_num);
 void syscall_init (void);
-void close_all_files (struct thread *t);
+int sys_write(int fd, const void *buffer, unsigned int size);
+int sys_read (int fd, void *buffer, unsigned size);
+void sys_seek(int fd, unsigned position);
+unsigned sys_tell(int fd);
+void close_extra_files(int fd_num);
+void close_thread_files(tid_t tid);
+void sys_close(int fd);
 
 #endif /* userprog/syscall.h */
